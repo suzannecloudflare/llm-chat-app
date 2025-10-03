@@ -14,9 +14,7 @@
   "observability": {
     "enabled": true
   },
-  "logpush": {
-    "enabled": true
-  },  
+  "logpush": true,
   "ai": {
     "binding": "AI"
   },
