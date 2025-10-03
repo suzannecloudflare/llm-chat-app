@@ -77,7 +77,7 @@ async function handleChatRequest(
         returnRawResponse: true,
         // Uncomment to use AI Gateway
         gateway: {
-          id: "https://gateway.ai.cloudflare.com/v1/498d0b7749be2013a4f367982f65258c/oracle/", // Replace with your AI Gateway ID
+          id: "oracle", // Replace with your AI Gateway ID
           skipCache: false,      // Set to true to bypass cache
           cacheTtl: 3600,        // Cache time-to-live in seconds
         },
