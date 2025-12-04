@@ -59,9 +59,18 @@ async function handleChatRequest(
 ): Promise<Response> {
   try {
     // Verify Cloudflare Access JWT before processing the chat request
-    const authResponse = await verifyAccessJwt(request, env);
+    const { response: authResponse, identity } = await verifyAccessJwt(
+      request,
+      env,
+    );
     if (authResponse) {
       return authResponse;
+    }
+
+    let who: string | undefined;
+    if (identity) {
+      who = identity.email || identity.sub || "authenticated user";
+      console.log("Access user:", who);
     }
 
     // Parse JSON request body
@@ -72,6 +81,14 @@ async function handleChatRequest(
     // Add system prompt if not present
     if (!messages.some((msg) => msg.role === "system")) {
       messages.unshift({ role: "system", content: SYSTEM_PROMPT });
+    }
+
+    // Include the authenticated user identity in the system context
+    if (who) {
+      messages.unshift({
+        role: "system",
+        content: `Authenticated user identity: ${who}`,
+      });
     }
 
     const response = await env.AI.run(
@@ -112,21 +129,25 @@ async function handleChatRequest(
 async function verifyAccessJwt(
   request: Request,
   env: Env,
-): Promise<Response | undefined> {
+): Promise<{ response?: Response; identity?: JwtIdentity }> {
   if (!env.POLICY_AUD) {
-    return new Response("Missing required audience", {
-      status: 403,
-      headers: { "Content-Type": "text/plain" },
-    });
+    return {
+      response: new Response("Missing required audience", {
+        status: 403,
+        headers: { "Content-Type": "text/plain" },
+      }),
+    };
   }
 
   const token = request.headers.get("cf-access-jwt-assertion");
 
   if (!token) {
-    return new Response("Missing required CF Access JWT", {
-      status: 403,
-      headers: { "Content-Type": "text/plain" },
-    });
+    return {
+      response: new Response("Missing required CF Access JWT", {
+        status: 403,
+        headers: { "Content-Type": "text/plain" },
+      }),
+    };
   }
 
   try {
@@ -134,20 +155,30 @@ async function verifyAccessJwt(
       new URL(`${env.TEAM_DOMAIN}/cdn-cgi/access/certs`),
     );
 
-    await jwtVerify(token, JWKS, {
+    const { payload } = await jwtVerify(token, JWKS, {
       issuer: env.TEAM_DOMAIN,
       audience: env.POLICY_AUD,
     });
 
-    // Token is valid; allow caller to continue
-    return undefined;
+    // Token is valid; expose basic identity information
+    const email = (payload as any).email as string | undefined;
+    const sub = (payload as any).sub as string | undefined;
+
+    return { identity: { email, sub } };
   } catch (error) {
     const message =
       error instanceof Error ? error.message : "Unknown verification error";
-    return new Response(`Invalid token: ${message}`, {
-      status: 403,
-      headers: { "Content-Type": "text/plain" },
-    });
+    return {
+      response: new Response(`Invalid token: ${message}`, {
+        status: 403,
+        headers: { "Content-Type": "text/plain" },
+      }),
+    };
   }
+}
+
+interface JwtIdentity {
+  email?: string;
+  sub?: string;
 }
 

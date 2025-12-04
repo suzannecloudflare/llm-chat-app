@@ -156,3 +156,4 @@ function addMessageToChat(role, content) {
   // Scroll to bottom
   chatMessages.scrollTop = chatMessages.scrollHeight;
 }
+
