@@ -8,6 +8,7 @@
  * @license MIT
  */
 import { Env, ChatMessage } from "./types";
+import { jwtVerify, createRemoteJWKSet } from "jose";
 
 // Model ID for Workers AI model
 // https://developers.cloudflare.com/workers-ai/models/
@@ -57,6 +58,12 @@ async function handleChatRequest(
   env: Env,
 ): Promise<Response> {
   try {
+    // Verify Cloudflare Access JWT before processing the chat request
+    const authResponse = await verifyAccessJwt(request, env);
+    if (authResponse) {
+      return authResponse;
+    }
+
     // Parse JSON request body
     const { messages = [] } = (await request.json()) as {
       messages: ChatMessage[];
@@ -97,3 +104,50 @@ async function handleChatRequest(
     );
   }
 }
+
+/**
+ * Verifies the Cloudflare Access JWT included in the request headers.
+ * Returns a Response on failure, or undefined on success so the caller can proceed.
+ */
+async function verifyAccessJwt(
+  request: Request,
+  env: Env,
+): Promise<Response | undefined> {
+  if (!env.POLICY_AUD) {
+    return new Response("Missing required audience", {
+      status: 403,
+      headers: { "Content-Type": "text/plain" },
+    });
+  }
+
+  const token = request.headers.get("cf-access-jwt-assertion");
+
+  if (!token) {
+    return new Response("Missing required CF Access JWT", {
+      status: 403,
+      headers: { "Content-Type": "text/plain" },
+    });
+  }
+
+  try {
+    const JWKS = createRemoteJWKSet(
+      new URL(`${env.TEAM_DOMAIN}/cdn-cgi/access/certs`),
+    );
+
+    await jwtVerify(token, JWKS, {
+      issuer: env.TEAM_DOMAIN,
+      audience: env.POLICY_AUD,
+    });
+
+    // Token is valid; allow caller to continue
+    return undefined;
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "Unknown verification error";
+    return new Response(`Invalid token: ${message}`, {
+      status: 403,
+      headers: { "Content-Type": "text/plain" },
+    });
+  }
+}
+

@@ -18,5 +18,9 @@
   "ai": {
     "binding": "AI"
   },
-  "upload_source_maps": true
+  "upload_source_maps": true,
+  "vars": {
+    "TEAM_DOMAIN": "https://suzannes-demo-environment.cloudflareaccess.com",
+    "POLICY_AUD": "b89e7f315093bd52cd6f77ffec190c4e4020ff0c35ccef3e49391982c336a876"
+  }
 }

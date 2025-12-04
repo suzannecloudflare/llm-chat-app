@@ -32,5 +32,8 @@
     "dev": "wrangler dev",
     "start": "wrangler dev",
     "test": "vitest"
+  },
+  "dependencies": {
+    "jose": "^6.1.3"
   }
 }

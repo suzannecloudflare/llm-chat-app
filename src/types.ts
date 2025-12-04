@@ -12,6 +12,16 @@ export interface Env {
    * Binding for static assets.
    */
   ASSETS: { fetch: (request: Request) => Promise<Response> };
+
+  /**
+   * Cloudflare Access team domain (issuer for JWTs), e.g. "https://your-team.cloudflareaccess.com".
+   */
+  TEAM_DOMAIN: string;
+
+  /**
+   * Expected audience for the Access policy protecting this Worker.
+   */
+  POLICY_AUD: string;
 }
 
 /**
