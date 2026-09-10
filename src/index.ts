@@ -12,16 +12,30 @@
  */
 import { Env, ChatMessage } from "./types";
 
-// AI Gateway dynamic route for failover demo.
-// Route: oracle/failover
-// Primary: openai/gpt-4o, timeout 3000ms, retries 3
-// Fallback: workers-ai/@cf/meta/llama-3.3-70b-instruct-fp8-fast
-const GATEWAY_ID = "oracle";
+// --- Configuration -------------------------------------------------------
+
+// When set, the Worker routes requests through an AI Gateway dynamic route
+// (e.g. "dynamic/failover"). The failover logic is configured entirely on the
+// gateway side — see the README for setup instructions. When not set, the
+// Worker falls back to client-side model fallback (FALLBACK_MODEL below).
 const DYNAMIC_ROUTE = "dynamic/failover";
+
+// Primary model for client-side fallback (used when DYNAMIC_ROUTE is empty)
+// https://developers.cloudflare.com/workers-ai/models/
+const PRIMARY_MODEL = "@cf/meta/llama-3.1-8b-instruct-fp8";
+
+// Fallback model if the primary model fails (used when DYNAMIC_ROUTE is empty)
+const FALLBACK_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
+
+// AI Gateway ID. Set this to use AI Gateway features (caching, analytics,
+// dynamic routing). Leave empty to call Workers AI directly.
+const GATEWAY_ID = "oracle";
 
 // Default system prompt
 const SYSTEM_PROMPT =
   "You are a helpful, friendly assistant. Provide concise and accurate responses.";
+
+// --- Worker entry point -------------------------------------------------
 
 export default {
   /**
@@ -41,12 +55,9 @@ export default {
 
     // API Routes
     if (url.pathname === "/api/chat") {
-      // Handle POST requests for chat
       if (request.method === "POST") {
         return handleChatRequest(request, env);
       }
-
-      // Method not allowed for other request types
       return new Response("Method not allowed", { status: 405 });
     }
 
@@ -55,60 +66,27 @@ export default {
   },
 } satisfies ExportedHandler<Env>;
 
-/**
- * Handles chat API requests
- */
+// --- Chat handler --------------------------------------------------------
+
 async function handleChatRequest(
   request: Request,
   env: Env,
 ): Promise<Response> {
   try {
-    // Parse JSON request body
     const { messages = [] } = (await request.json()) as {
       messages: ChatMessage[];
     };
 
-    // Add system prompt if not present
     if (!messages.some((msg) => msg.role === "system")) {
       messages.unshift({ role: "system", content: SYSTEM_PROMPT });
     }
 
-    const response = await env.AI.gateway(GATEWAY_ID).run({
-      provider: "compat",
-      endpoint: "chat/completions",
-      headers: {},
-      query: {
-        model: DYNAMIC_ROUTE,
-        messages,
-        max_tokens: 1024,
-        stream: true,
-      },
-    });
-
-    if (!response.ok || !response.body) {
-      const body = await response.text();
-      console.error("AI Gateway dynamic route failed:", response.status, body);
-      return new Response(
-        JSON.stringify({ error: "AI Gateway dynamic route failed", status: response.status, body }),
-        {
-          status: response.status || 502,
-          headers: { "content-type": "application/json" },
-        },
-      );
+    // Choose strategy: dynamic route (gateway-managed failover) or
+    // client-side fallback
+    if (DYNAMIC_ROUTE) {
+      return handleWithDynamicRoute(env, messages);
     }
-
-    // The frontend expects Workers AI-style JSON lines with a `response` field.
-    // Dynamic routes use the OpenAI-compatible streaming format, so normalize it.
-    return new Response(normalizeOpenAIStream(response.body), {
-      headers: {
-        "content-type": "text/event-stream; charset=utf-8",
-        "cache-control": "no-cache",
-        connection: "keep-alive",
-        "x-ai-gateway-route": DYNAMIC_ROUTE,
-        "x-ai-gateway-provider": response.headers.get("cf-aig-provider") || "",
-        "x-ai-gateway-model": response.headers.get("cf-aig-model") || "",
-      },
-    });
+    return handleWithClientFallback(env, messages);
   } catch (error) {
     console.error("Error processing chat request:", error);
     return new Response(
@@ -121,61 +99,106 @@ async function handleChatRequest(
   }
 }
 
-/**
- * Converts OpenAI-compatible SSE chunks into the JSON-line format the existing
- * frontend already consumes: { "response": "text" }\n
- */
-function normalizeOpenAIStream(stream: ReadableStream<Uint8Array>) {
-  const decoder = new TextDecoder();
-  const encoder = new TextEncoder();
-  let buffer = "";
+// --- Strategy 1: Gateway-managed failover (recommended) ------------------
+//
+// Uses an AI Gateway dynamic route. The failover chain (e.g. OpenAI → Workers AI)
+// is configured in the dashboard or via the API — no retry logic in your app.
+// The gateway retries the primary model and falls back automatically.
+//
+// See: https://developers.cloudflare.com/ai-gateway/features/dynamic-routing/usage/
 
-  return stream.pipeThrough(
-    new TransformStream<Uint8Array, Uint8Array>({
-      transform(chunk, controller) {
-        buffer += decoder.decode(chunk, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
+async function handleWithDynamicRoute(
+  env: Env,
+  messages: ChatMessage[],
+): Promise<Response> {
+  const gateway = GATEWAY_ID || "default";
+  const response = await env.AI.gateway(gateway).run({
+    provider: "compat",
+    endpoint: "chat/completions",
+    headers: {},
+    query: {
+      model: DYNAMIC_ROUTE,
+      messages,
+      max_tokens: 1024,
+      stream: true,
+    },
+  });
 
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed || trimmed === "data: [DONE]") {
-            continue;
-          }
+  // gateway().run() with the compat provider returns a Response directly
+  return response;
+}
 
-          if (!trimmed.startsWith("data:")) {
-            continue;
-          }
+// --- Strategy 2: Client-side fallback ------------------------------------
+//
+// Tries the primary model first. If it fails, falls back to a secondary model.
+// This approach requires no dynamic route setup but only works within a single
+// provider (Workers AI). For cross-provider failover (e.g. OpenAI → Anthropic),
+// use Strategy 1 with a dynamic route.
 
-          try {
-            const data = JSON.parse(trimmed.slice("data:".length).trim());
-            const content = data.choices?.[0]?.delta?.content;
-            if (content) {
-              controller.enqueue(
-                encoder.encode(`${JSON.stringify({ response: content })}\n`),
-              );
-            }
-          } catch (error) {
-            console.error("Error parsing AI Gateway stream chunk:", error);
-          }
-        }
+async function handleWithClientFallback(
+  env: Env,
+  messages: ChatMessage[],
+): Promise<Response> {
+  const inputs = {
+    messages,
+    max_tokens: 1024,
+    stream: true,
+  } satisfies AiTextGenerationInput & { stream: true };
+
+  const gatewayOptions = GATEWAY_ID
+    ? {
+        gateway: {
+          id: GATEWAY_ID,
+          skipCache: false,
+          cacheTtl: 3600,
+        },
+      }
+    : {};
+
+  try {
+    const stream = await env.AI.run<typeof PRIMARY_MODEL>(
+      PRIMARY_MODEL,
+      inputs,
+      gatewayOptions,
+    );
+    return new Response(stream, {
+      headers: {
+        "content-type": "text/event-stream; charset=utf-8",
+        "cache-control": "no-cache",
+        connection: "keep-alive",
       },
-      flush(controller) {
-        const trimmed = buffer.trim();
-        if (trimmed.startsWith("data:") && trimmed !== "data: [DONE]") {
-          try {
-            const data = JSON.parse(trimmed.slice("data:".length).trim());
-            const content = data.choices?.[0]?.delta?.content;
-            if (content) {
-              controller.enqueue(
-                encoder.encode(`${JSON.stringify({ response: content })}\n`),
-              );
-            }
-          } catch (error) {
-            console.error("Error parsing final AI Gateway stream chunk:", error);
-          }
-        }
-      },
-    }),
-  );
+    });
+  } catch (primaryError) {
+    console.error(
+      `Primary model ${PRIMARY_MODEL} failed, falling back to ${FALLBACK_MODEL}:`,
+      primaryError,
+    );
+
+    try {
+      const fallbackStream = await env.AI.run<typeof FALLBACK_MODEL>(
+        FALLBACK_MODEL,
+        inputs,
+        gatewayOptions,
+      );
+      return new Response(fallbackStream, {
+        headers: {
+          "content-type": "text/event-stream; charset=utf-8",
+          "cache-control": "no-cache",
+          connection: "keep-alive",
+        },
+      });
+    } catch (fallbackError) {
+      console.error(
+        `Fallback model ${FALLBACK_MODEL} also failed:`,
+        fallbackError,
+      );
+      return new Response(
+        JSON.stringify({ error: "All models failed" }),
+        {
+          status: 503,
+          headers: { "content-type": "application/json" },
+        },
+      );
+    }
+  }
 }
