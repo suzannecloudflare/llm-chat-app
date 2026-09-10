@@ -1,7 +1,8 @@
 /**
  * For more details on how to configure Wrangler, refer to:
  * https://developers.cloudflare.com/workers/wrangler/configuration/
- */ {
+ */
+{
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "llm-chat-app",
   "main": "src/index.ts",
@@ -12,9 +13,18 @@
     "directory": "./public"
   },
   "observability": {
-    "enabled": true
+    "logs": {
+      "enabled": true,
+      "head_sampling_rate": 1,
+      "invocation_logs": true,
+      "persist": true
+    },
+    "traces": {
+      "enabled": true,
+      "head_sampling_rate": 1,
+      "persist": true
+    }
   },
-  "logpush": true,
   "ai": {
     "binding": "AI"
   },
